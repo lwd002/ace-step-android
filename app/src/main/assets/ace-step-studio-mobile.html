@@ -1869,6 +1869,15 @@ function renderJob(job){
   }
 }
 
+/* renderJob rebuilds the whole job element, which throws away the Audio object
+   with it — refreshing while a song is playing would cut it off mid-bar. The
+   cached copy is already recorded on the track, so the swap can simply wait for
+   a quiet moment; until then the track keeps streaming from the server. */
+function renderJobUnlessPlaying(job){
+  if (allAudios.some(function(a){ return !a.paused && !a.ended; })) return;
+  renderJob(job);
+}
+
 function startPolling(){ if (!pollTimer) pollTimer = setInterval(pollActiveJobs, 2200); }
 function stopPollingIfIdle(){
   const active = [...jobs.values()].some(j=>j.status==='queued'||j.status==='running');
@@ -2091,7 +2100,7 @@ async function pollActiveJobs(){
         renderJob(job);
         /* Deliberately not awaited: the poll tick must not sit behind a download. */
         job.tracks.forEach(function(t){
-          cacheTrack(job, t).then(function(){ renderJob(job); });
+          cacheTrack(job, t).then(function(){ renderJobUnlessPlaying(job); });
         });
       } else if (r.status === 2){
         job.status = 'failed';

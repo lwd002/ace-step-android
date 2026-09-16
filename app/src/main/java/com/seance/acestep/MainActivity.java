@@ -200,10 +200,13 @@ public class MainActivity extends Activity {
                             return;                     // a retry that worked stays silent
                         } catch (Exception e) {
                             last = e;
+                            /* Only on the way out: disconnect() closes the socket instead of
+                               handing it back, so calling it after a good response would undo
+                               the connection reuse we want. readAll() has closed the stream,
+                               which is what actually returns the connection to the pool. */
+                            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
                             if (answered && !idempotent) break;
                             if (attempt < MAX_ATTEMPTS) sleepBackoff(attempt);
-                        } finally {
-                            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
                         }
                     }
                     String msg = safeMsg(last);
@@ -258,11 +261,13 @@ public class MainActivity extends Activity {
                         } catch (Exception e) {
                             last = e;
                             if (out != null) out.delete();   // never leave half a song in the cache
+                            /* Failed transfer: drop the socket rather than pool it. On success
+                               the stream is closed below and the connection stays reusable. */
+                            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
                             if (attempt < MAX_ATTEMPTS) sleepBackoff(attempt);
                         } finally {
                             if (fos != null) try { fos.close(); } catch (Exception ignored) {}
                             if (in != null) try { in.close(); } catch (Exception ignored) {}
-                            if (c != null) try { c.disconnect(); } catch (Exception ignored) {}
                         }
                     }
                     callJs("window.__nativeDlDone('" + id + "',false,'" + safeMsg(last) + "')");
