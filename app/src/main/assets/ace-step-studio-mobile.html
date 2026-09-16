@@ -755,9 +755,11 @@ function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<
    ============================================================ */
 const NATIVE = !!(window.AndroidBridge && window.AndroidBridge.httpRequest);
 const __nat = {seq: 0, pending: {}};
-window.__nativeHttpDone = function(id, status, b64){
+/* status 0 means the bridge gave up after its retries; `err` carries the real
+   socket error so the page can say what actually went wrong. */
+window.__nativeHttpDone = function(id, status, b64, err){
   const p = __nat.pending[id]; if (!p) return; delete __nat.pending[id];
-  if (!status){ p.reject(new Error('原生请求失败（网络/地址错误）')); return; }
+  if (!status){ p.reject(new Error(err || '原生请求失败（网络/地址错误）')); return; }
   try{
     const bin = atob(b64 || '');
     const bytes = new Uint8Array(bin.length);
