@@ -58,7 +58,15 @@ input,textarea,select{font-size:16px !important;}
 .brand-mark span{color:var(--amber);}
 .brand-sub{font-family:var(--font-mono);font-size:8.5px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-faint);}
 .topbar-right{display:flex;align-items:center;gap:8px;}
-.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text-faint);flex-shrink:0;}
+/* The dot is tappable (state + retry), so give it a finger-sized hit area
+   without changing how small it looks. */
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--text-faint);flex-shrink:0;position:relative;cursor:pointer;}
+.status-dot::after{content:'';position:absolute;top:-14px;right:-14px;bottom:-14px;left:-14px;}
+/* Spelt out next to the dot, because a colour alone doesn't say which colour it was. */
+.status-text{font-family:var(--font-mono);font-size:10.5px;letter-spacing:.06em;color:var(--text-faint);cursor:pointer;user-select:none;}
+.status-text.on{color:var(--teal);}
+.status-text.pending{color:var(--amber);}
+.status-text.off{color:var(--red);}
 .status-dot.on{background:var(--teal);box-shadow:0 0 8px var(--teal);}
 .status-dot.off{background:var(--red);}
 .status-dot.pending{background:var(--amber);animation:pulse-dot 1.2s ease-in-out infinite;}
@@ -312,8 +320,8 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
     <div class="brand-sub">ACE-Step</div>
   </div>
   <div class="topbar-right">
-    <div class="status-dot off" id="statusDot" title="连接状态"></div>
-    <span id="statusText" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);"></span>
+    <div class="status-dot pending" id="statusDot" title="正在连接服务器…"></div>
+    <span id="statusText" class="status-text pending">连接中</span>
     <button class="icon-btn" id="openSettings" aria-label="设置">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
     </button>
@@ -886,29 +894,85 @@ function audioUrl(fileField){
 }
 
 /* ============================================================
-   Connection status
+   Connection status — watched and self-healing.
+   The dot keeps probing on its own, so it stays truthful and the app comes
+   back by itself once the tunnel does, instead of waiting for the next thing
+   you tap to fail. statusText is screen-reader-only, so the reason lives in
+   the dot: tap it to hear what is wrong and retry at once.
    ============================================================ */
 let connected = false;
-async function refreshStatus(){
+let statusTimer = null;
+let statusFails = 0;
+let statusReason = '尚未连接';
+const HEALTH_OK_MS = 30000;    // steady state: a light touch twice a minute
+const HEALTH_DOWN_MS = 5000;   // while down: probe often so recovery feels instant
+
+function setStatus(state, text, reason){
   const dot = document.getElementById('statusDot');
   const txt = document.getElementById('statusText');
-  dot.className = 'status-dot pending';
-  txt.textContent = '连接中…';
+  if (dot){ dot.className = 'status-dot ' + state; dot.title = reason; }
+  if (txt){ txt.className = 'status-text ' + state; txt.textContent = text; txt.title = reason; }
+  statusReason = reason;
+}
+
+/* `quiet` marks a background watch tick: don't flash "连接中…" over a working
+   screen, and don't redo the expensive on-connect work unless we just came back. */
+async function refreshStatus(quiet){
+  if (!quiet) setStatus('pending', '连接中', '正在连接 ' + Config.apiBase);
   try{
     const health = await pingHealth();
+    const wasDown = !connected;
     connected = true;
-    dot.className = 'status-dot on';
-    txt.textContent = Config.apiBase.replace(/^https?:\/\//,'');
+    statusFails = 0;
+    setStatus('on', '已连接', '已连接 · ' + Config.apiBase);
     updateLmStat(health);
-    loadModels();
-    refreshStats();
-    ensureInitialized(health);
+    if (wasDown || !quiet){
+      loadModels();
+      refreshStats();
+      ensureInitialized(health);
+    }
   }catch(e){
     connected = false;
-    dot.className = 'status-dot off';
-    txt.textContent = '未连接';
+    statusFails++;
+    const why = (e && e.message) ? e.message : '未知错误';
+    /* The native bridge already retried three times underneath this call, so a
+       single miss deserves an amber "reconnecting", not a red "dead". */
+    if (statusFails < 2) setStatus('pending', '重连中', '连接不稳定：' + why);
+    else setStatus('off', '断开', '连接失败：' + why);
   }
+  scheduleStatusWatch();
 }
+
+function scheduleStatusWatch(){
+  if (statusTimer) clearTimeout(statusTimer);
+  statusTimer = setTimeout(function(){ refreshStatus(true); },
+                           connected ? HEALTH_OK_MS : HEALTH_DOWN_MS);
+}
+
+/* Probing a dead tunnel from the background only burns battery; check the
+   instant the app is looked at again instead. */
+document.addEventListener('visibilitychange', function(){
+  if (document.visibilityState === 'visible'){
+    refreshStatus(true);
+  } else if (statusTimer){
+    clearTimeout(statusTimer);
+    statusTimer = null;
+  }
+});
+
+/* The header only has room for two words, so tapping the indicator spells out
+   the actual reason and retries straight away instead of making you wait for
+   the next watch tick. */
+(function(){
+  function wire(el){
+    if (el) el.addEventListener('click', function(){
+      toast(statusReason, connected ? 'success' : 'error');
+      refreshStatus(false);
+    });
+  }
+  wire(document.getElementById('statusDot'));
+  wire(document.getElementById('statusText'));
+})();
 
 /* Server lazy-loads nothing on its own: with models_initialized=false every
    /release_task fails silently (stage "failed"), and with llm_initialized=false
