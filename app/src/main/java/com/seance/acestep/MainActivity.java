@@ -58,13 +58,11 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         pool = Executors.newFixedThreadPool(4);
 
-        /* Android keeps HTTP connections alive and reuses them. When the far end —
-           or the VPN tunnel in between — has silently dropped one, the next request
-           inherits the dead socket and fails immediately with "Software caused
-           connection abort" / "failed to connect", which is exactly the intermittent
-           breakage seen in the field. This traffic is low-rate (a poll every few
-           seconds), so paying for a fresh connection each time is the better deal. */
-        System.setProperty("http.keepAlive", "false");
+        /* Connection reuse stays ON. Turning it off did cure the dead-socket errors,
+           but it also meant every poll opened a fresh TCP connection through the
+           tunnel, and that churn competed with the multi-MB song downloads. The
+           retry below covers the same failure more cheaply: a stale connection
+           fails instantly, and the second attempt gets a new socket. */
 
         // fetched songs are cached here and served back to the page same-origin;
         // safe to wipe on every launch — the page keeps its own copies in IndexedDB
@@ -180,7 +178,6 @@ public class MainActivity extends Activity {
                             c.setRequestMethod(method);
                             c.setConnectTimeout(CONNECT_TIMEOUT_MS);
                             c.setReadTimeout(READ_TIMEOUT_MS);
-                            c.setRequestProperty("Connection", "close");
                             JSONObject headers = new JSONObject(headersJson);
                             Iterator<String> it = headers.keys();
                             while (it.hasNext()) {
@@ -245,7 +242,6 @@ public class MainActivity extends Activity {
                             c = (HttpURLConnection) new URL(url).openConnection();
                             c.setConnectTimeout(CONNECT_TIMEOUT_MS);
                             c.setReadTimeout(DOWNLOAD_TIMEOUT_MS);
-                            c.setRequestProperty("Connection", "close");
                             int status = c.getResponseCode();
                             if (status < 200 || status >= 300) throw new Exception("HTTP " + status);
                             out = new File(audioCacheDir, UUID.randomUUID().toString() + "." + ext);

@@ -562,7 +562,8 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
               <div class="field"><label class="field-label">推理步数</label><input type="number" id="inferenceSteps" value="8" min="1" max="200"></div>
             </div>
             <div class="field"><label class="field-label">输出格式</label>
-              <select id="audioFormat"><option value="mp3">MP3</option><option value="wav">WAV</option><option value="flac">FLAC</option><option value="opus">OPUS</option><option value="aac">AAC</option></select>
+              <!-- Ordered by download cost: a 4min WAV is ~40MB over the tunnel, an MP3 ~4MB. -->
+              <select id="audioFormat"><option value="mp3">MP3（推荐 · 约 4MB）</option><option value="opus">OPUS（更小）</option><option value="aac">AAC（小）</option><option value="wav">WAV（无损 · 约 40MB，手机下载慢）</option><option value="flac">FLAC（无损 · 很大）</option></select>
             </div>
             <div class="switch-row">
               <div class="switch-label">随机种子</div>
@@ -2011,20 +2012,37 @@ function reapplySnapshot(snap){
   toast('已恢复这首歌当时的全部设置（含种子）','success');
 }
 
-async function fetchAsBlobTrack(job, parsedItem, titleSuffix, seedForThis){
+/* The song already exists on the server the moment generation finishes, so a
+   track is built from the server URL straight away — playable immediately —
+   and the local copy is fetched afterwards. Waiting on a multi-MB download
+   before showing anything made a finished song look like nothing happened. */
+function buildTrack(job, parsedItem, titleSuffix, seedForThis){
   const remoteUrl = audioUrl(parsedItem.file);
   const ext = (Config_lastFormat || 'mp3');
   const lmShort = parsedItem.lm_model ? ('LM ' + String(parsedItem.lm_model).replace('acestep-5Hz-lm-','')) : '';
   const meta = parsedItem.metas ? [parsedItem.metas.bpm && (parsedItem.metas.bpm+' BPM'), parsedItem.metas.keyscale, parsedItem.metas.duration && (Math.round(parsedItem.metas.duration)+'s'), seedForThis && ('seed '+seedForThis), lmShort].filter(Boolean).join(' · ') : [seedForThis && ('seed '+seedForThis), lmShort].filter(Boolean).join(' · ');
-  const title = job.title + (titleSuffix||'');
-  const snapshot = job.formSnapshot ? Object.assign({}, job.formSnapshot, {seed: seedForThis}) : null;
+  return {
+    playUrl: remoteUrl,
+    remoteUrl: remoteUrl,
+    blob: null,
+    ext: ext,
+    meta: meta,
+    title: job.title + (titleSuffix||''),
+    snapshot: job.formSnapshot ? Object.assign({}, job.formSnapshot, {seed: seedForThis}) : null,
+    caching: true
+  };
+}
+
+/* Pulls the bytes down afterwards and swaps the track onto the local copy.
+   Failing is not fatal — the track simply keeps playing from the server. */
+async function cacheTrack(job, track){
   try{
     let blob;
     if (NATIVE){
       /* native downloads the file, then the page reads it back: first try the
          same-origin virtual URL (cheap), and if the asset loader can't serve it
          fall back to streaming the bytes over the bridge in chunks */
-      const virt = await natDownload(remoteUrl);
+      const virt = await natDownload(track.remoteUrl);
       try{
         const res = await fetch(virt);
         if (!res.ok) throw new Error('HTTP '+res.status);
@@ -2033,17 +2051,18 @@ async function fetchAsBlobTrack(job, parsedItem, titleSuffix, seedForThis){
         blob = await natStreamBlob(virt.split('/').pop());
       }
     } else {
-      const res = await fetch(remoteUrl);
+      const res = await fetch(track.remoteUrl);
       if (!res.ok) throw new Error('HTTP '+res.status);
       blob = await res.blob();
     }
-    const objUrl = URL.createObjectURL(blob);
-    addTrackToLibrary({title, blob, meta, ext, snapshot});
-    return {playUrl: objUrl, blob, ext, meta, title, snapshot};
+    track.blob = blob;
+    track.playUrl = URL.createObjectURL(blob);
+    addTrackToLibrary({title: track.title, blob: blob, meta: track.meta, ext: track.ext, snapshot: track.snapshot});
   }catch(e){
     job.cacheFailed = true;
     job.cacheError = e && e.message ? e.message : String(e);
-    return {playUrl: remoteUrl, blob: null, ext, meta, title, snapshot};
+  }finally{
+    track.caching = false;
   }
 }
 
@@ -2063,15 +2082,17 @@ async function pollActiveJobs(){
         try{ parsed = JSON.parse(r.result); }catch(e){ parsed = Array.isArray(r.result)?r.result:[r.result]; }
         if (!Array.isArray(parsed)) parsed = [parsed];
         parsed = parsed.filter(p=>p && p.file);
-        job.tracks = [];
-        for (let i=0;i<parsed.length;i++){
+        job.tracks = parsed.map(function(p, i){
           const suffix = parsed.length>1 ? (' #'+(i+1)) : '';
-          const seedForThis = extractSeedForIndex(parsed[i].seed_value, i);
-          const t = await fetchAsBlobTrack(job, parsed[i], suffix, seedForThis);
-          job.tracks.push(t);
-        }
+          return buildTrack(job, p, suffix, extractSeedForIndex(p.seed_value, i));
+        });
+        /* Show it now — it is finished and already playable from the server. */
         toast('《'+job.title+'》生成完成 🎵','success');
         renderJob(job);
+        /* Deliberately not awaited: the poll tick must not sit behind a download. */
+        job.tracks.forEach(function(t){
+          cacheTrack(job, t).then(function(){ renderJob(job); });
+        });
       } else if (r.status === 2){
         job.status = 'failed';
         job.error = r.error || '生成失败';
