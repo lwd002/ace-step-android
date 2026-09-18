@@ -562,8 +562,9 @@ input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;bac
               <div class="field"><label class="field-label">推理步数</label><input type="number" id="inferenceSteps" value="8" min="1" max="200"></div>
             </div>
             <div class="field"><label class="field-label">输出格式</label>
-              <!-- Ordered by download cost: a 4min WAV is ~40MB over the tunnel, an MP3 ~4MB. -->
-              <select id="audioFormat"><option value="mp3">MP3（推荐 · 约 4MB）</option><option value="opus">OPUS（更小）</option><option value="aac">AAC（小）</option><option value="wav">WAV（无损 · 约 40MB，手机下载慢）</option><option value="flac">FLAC（无损 · 很大）</option></select>
+              <!-- Ordered by download cost: a 4min WAV is ~40MB over the tunnel, an MP3 ~4MB.
+                   The song has to finish downloading before it plays, so this is the wait. -->
+              <select id="audioFormat"><option value="mp3">MP3（推荐 · 约 4MB）</option><option value="opus">OPUS（更小）</option><option value="aac">AAC（小）</option><option value="wav">WAV（无损 · 约 40MB，手机要等很久）</option><option value="flac">FLAC（无损 · 很大）</option></select>
             </div>
             <div class="switch-row">
               <div class="switch-label">随机种子</div>
@@ -1855,90 +1856,18 @@ function renderJob(job){
 
   if (job.status==='succeeded' && job.tracks && job.tracks.length){
     const tracksWrap = document.createElement('div'); tracksWrap.className='tracks';
-    job.tracks.forEach((t, idx)=>{
-      /* No playable URL yet (app, still downloading or download failed): show
-         where it stands instead of a player that can only fail. */
-      const trackEl = t.playUrl
-        ? buildTrackEl(t.playUrl, t.title, {meta:t.meta, blob:t.blob, ext:t.ext, snapshot:t.snapshot})
-        : buildPendingTrackEl(job, t, idx);
-      trackEl.id = 'track-' + job.id + '-' + idx;   // so one card can be swapped alone
+    job.tracks.forEach((t)=>{
+      const trackEl = buildTrackEl(t.playUrl, t.title, {meta:t.meta, blob:t.blob, ext:t.ext, snapshot:t.snapshot});
       tracksWrap.appendChild(trackEl);
     });
     el.appendChild(tracksWrap);
-    /* Only true in a browser. Inside the app the remote address is unreachable
-       from this origin, so falling back to it is not an option — there the
-       failure and its retry are shown on the track itself instead. */
-    if (job.cacheFailed && !NATIVE){
+    if (job.cacheFailed){
       const note = document.createElement('div');
       note.className = 'cache-note';
       note.textContent = '⚠ 无法缓存到本地曲库' + (job.cacheError ? ('：' + job.cacheError) : '（可能是服务端未开启 CORS）') + '，播放/下载会直接访问服务器地址';
       el.appendChild(note);
     }
   }
-}
-
-/* Stands in for a track that has no playable source yet. In the app a song only
-   becomes playable once the bridge has copied it into the local cache, so this
-   shows the wait (or the failure, with a way to try again) rather than a dead
-   player. */
-function buildPendingTrackEl(job, t, idx){
-  const wrap = document.createElement('div');
-  wrap.className = 'track';
-  wrap.setAttribute('data-pending', '1');   // marks a card with no player inside
-  const row = document.createElement('div');
-  row.className = 'track-row';
-  row.textContent = t.title;
-  wrap.appendChild(row);
-
-  const note = document.createElement('div');
-  note.className = 'track-time';
-  note.style.textAlign = 'left';
-  note.style.minWidth = '0';
-  note.style.marginTop = '6px';
-
-  if (t.cacheError){
-    note.textContent = '⚠ 下载失败：' + t.cacheError;
-    wrap.appendChild(note);
-    const actions = document.createElement('div');
-    actions.className = 'track-actions';
-    const retry = document.createElement('button');
-    retry.textContent = '重试下载';
-    retry.addEventListener('click', function(){
-      t.cacheError = null;
-      t.caching = true;
-      refreshTrackEl(job, t, idx);                                   // back to "downloading…"
-      cacheTrack(job, t).then(function(){ refreshTrackEl(job, t, idx); });
-    });
-    actions.appendChild(retry);
-    wrap.appendChild(actions);
-  } else {
-    note.textContent = '⏳ 正在下载到本地…（' + String(t.ext || 'mp3').toUpperCase() + '）';
-    wrap.appendChild(note);
-  }
-  return wrap;
-}
-
-/* Swaps a single track card in place once its download lands. Doing a whole
-   renderJob here would be wrong twice over: it rebuilds every card with
-   innerHTML (killing any Audio mid-song), and skipping it whenever something
-   plays would strand the *other* track of a pair at "downloading" forever.
-   A placeholder owns no player, so replacing one can never cut off audio. */
-function refreshTrackEl(job, t, idx){
-  const old = document.getElementById('track-' + job.id + '-' + idx);
-  if (!old){
-    /* Card isn't on screen (job re-rendered under us) — fall back to a full
-       redraw, but not while something is playing. */
-    if (allAudios.some(function(a){ return !a.paused && !a.ended; })) return;
-    renderJob(job);
-    return;
-  }
-  const wasPlaceholder = old.getAttribute('data-pending') === '1';
-  if (!wasPlaceholder && allAudios.some(function(a){ return !a.paused && !a.ended; })) return;
-  const fresh = t.playUrl
-    ? buildTrackEl(t.playUrl, t.title, {meta:t.meta, blob:t.blob, ext:t.ext, snapshot:t.snapshot})
-    : buildPendingTrackEl(job, t, idx);
-  fresh.id = old.id;
-  old.replaceWith(fresh);
 }
 
 function startPolling(){ if (!pollTimer) pollTimer = setInterval(pollActiveJobs, 2200); }
@@ -2084,44 +2013,20 @@ function reapplySnapshot(snap){
   toast('已恢复这首歌当时的全部设置（含种子）','success');
 }
 
-/* The song already exists on the server the moment generation finishes, so a
-   track is built from the server URL straight away — playable immediately —
-   and the local copy is fetched afterwards. Waiting on a multi-MB download
-   before showing anything made a finished song look like nothing happened. */
-function buildTrack(job, parsedItem, titleSuffix, seedForThis){
+async function fetchAsBlobTrack(job, parsedItem, titleSuffix, seedForThis){
   const remoteUrl = audioUrl(parsedItem.file);
   const ext = (Config_lastFormat || 'mp3');
   const lmShort = parsedItem.lm_model ? ('LM ' + String(parsedItem.lm_model).replace('acestep-5Hz-lm-','')) : '';
   const meta = parsedItem.metas ? [parsedItem.metas.bpm && (parsedItem.metas.bpm+' BPM'), parsedItem.metas.keyscale, parsedItem.metas.duration && (Math.round(parsedItem.metas.duration)+'s'), seedForThis && ('seed '+seedForThis), lmShort].filter(Boolean).join(' · ') : [seedForThis && ('seed '+seedForThis), lmShort].filter(Boolean).join(' · ');
-  return {
-    /* In the app the page is a secure origin and the server is a plain-http
-       private address — exactly the pair the WebView refuses, which is the
-       whole reason the native bridge exists. So there is nothing playable here
-       until the file has been pulled into the local cache; handing the remote
-       URL to an <audio> would only produce "无法播放音频". In a plain browser
-       the same URL is fine, so it is used directly there. */
-    playUrl: NATIVE ? null : remoteUrl,
-    remoteUrl: remoteUrl,
-    blob: null,
-    ext: ext,
-    meta: meta,
-    title: job.title + (titleSuffix||''),
-    snapshot: job.formSnapshot ? Object.assign({}, job.formSnapshot, {seed: seedForThis}) : null,
-    caching: true,
-    cacheError: null
-  };
-}
-
-/* Pulls the bytes down afterwards and swaps the track onto the local copy.
-   Failing is not fatal — the track simply keeps playing from the server. */
-async function cacheTrack(job, track){
+  const title = job.title + (titleSuffix||'');
+  const snapshot = job.formSnapshot ? Object.assign({}, job.formSnapshot, {seed: seedForThis}) : null;
   try{
     let blob;
     if (NATIVE){
       /* native downloads the file, then the page reads it back: first try the
          same-origin virtual URL (cheap), and if the asset loader can't serve it
          fall back to streaming the bytes over the bridge in chunks */
-      const virt = await natDownload(track.remoteUrl);
+      const virt = await natDownload(remoteUrl);
       try{
         const res = await fetch(virt);
         if (!res.ok) throw new Error('HTTP '+res.status);
@@ -2130,19 +2035,17 @@ async function cacheTrack(job, track){
         blob = await natStreamBlob(virt.split('/').pop());
       }
     } else {
-      const res = await fetch(track.remoteUrl);
+      const res = await fetch(remoteUrl);
       if (!res.ok) throw new Error('HTTP '+res.status);
       blob = await res.blob();
     }
-    track.blob = blob;
-    track.playUrl = URL.createObjectURL(blob);
-    addTrackToLibrary({title: track.title, blob: blob, meta: track.meta, ext: track.ext, snapshot: track.snapshot});
+    const objUrl = URL.createObjectURL(blob);
+    addTrackToLibrary({title, blob, meta, ext, snapshot});
+    return {playUrl: objUrl, blob, ext, meta, title, snapshot};
   }catch(e){
     job.cacheFailed = true;
     job.cacheError = e && e.message ? e.message : String(e);
-    track.cacheError = job.cacheError;   // shown on the track itself, with a retry
-  }finally{
-    track.caching = false;
+    return {playUrl: remoteUrl, blob: null, ext, meta, title, snapshot};
   }
 }
 
@@ -2162,17 +2065,15 @@ async function pollActiveJobs(){
         try{ parsed = JSON.parse(r.result); }catch(e){ parsed = Array.isArray(r.result)?r.result:[r.result]; }
         if (!Array.isArray(parsed)) parsed = [parsed];
         parsed = parsed.filter(p=>p && p.file);
-        job.tracks = parsed.map(function(p, i){
+        job.tracks = [];
+        for (let i=0;i<parsed.length;i++){
           const suffix = parsed.length>1 ? (' #'+(i+1)) : '';
-          return buildTrack(job, p, suffix, extractSeedForIndex(p.seed_value, i));
-        });
-        /* Show it now — it is finished and already playable from the server. */
+          const seedForThis = extractSeedForIndex(parsed[i].seed_value, i);
+          const t = await fetchAsBlobTrack(job, parsed[i], suffix, seedForThis);
+          job.tracks.push(t);
+        }
         toast('《'+job.title+'》生成完成 🎵','success');
         renderJob(job);
-        /* Deliberately not awaited: the poll tick must not sit behind a download. */
-        job.tracks.forEach(function(t, idx){
-          cacheTrack(job, t).then(function(){ refreshTrackEl(job, t, idx); });
-        });
       } else if (r.status === 2){
         job.status = 'failed';
         job.error = r.error || '生成失败';
